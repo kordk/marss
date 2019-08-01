@@ -1,0 +1,10 @@
+gene,spp,averageCoverage,biMorphCount,triMorphCount,binLowCount,binMidCount,binHighCount
+geneName,sdro,57.8281228669,326,0,46,556,46
+geneName,afraSS,56.00230571,246,0,57,373,56
+geneName,spal,16.6795851528,244,0,117,287,115
+geneName,sfra,51.1422319475,29,0,4,46,4
+geneName,hpul,63.8383346851,82,0,30,104,30
+geneName,snud,63.1647457627,25,0,13,24,13
+geneName,sprp,42.2957556096,87,0,31,112,31
+geneName,sintSS,58.1151662612,85,0,23,126,22
+geneName,pdep,79.904396658,14,0,4,22,5

@@ -1,0 +1,9 @@
+sdro,sdro/map.bam
+spal,spal/map.bam
+sintSS,sintSS/map.bam
+afraSS,afraSS/map.bam
+sfra,sfra/map.bam
+snud,snud/map.bam
+pdep,pdep/map.bam
+hpul,hpul/map.bam
+sprp,sprp/map.bam
