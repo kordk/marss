@@ -63,7 +63,7 @@ Refer to INSTALL.txt at the project home page for help with installation of MARS
 | baseCalls      | Integer   | The count of successful base calls evaluated for the gene model (including no calls) |
 | totalBases     | Integer   | The count of all of the bases evaluated |
 | averageCoverage | Float    | baseCalls / count of nucleotides evaluated (i.e., gebe model length) |
-| minorAlleleCalls | Integer | The count of alleles considered to be valid based apon frequency |
+| minorAlleleCalls | Integer | The count of alleles considered to be valid based upon frequency |
 | divergentAlleleCalls | Integer | The count of alleles different from the reference |
 | polySiteCount | Integer | The count of valid polymorphic sites observed |
 | biMorphCount | Integer | The count of polymorphic sites wirh 2 valid alleles observed |
