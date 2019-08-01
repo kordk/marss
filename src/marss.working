@@ -1,0 +1,815 @@
+#!/usr/local/bin/python2.7
+
+
+## A program to generate a consensus alignment of coding regions for 
+## species aligned to a reference genome using the alignments (BAM 
+## files). A bunch of additional useful information is also provided 
+## for quality control and descriptions of the  alignments.
+
+## Written by: Kord M. Kober, kord.kober@ucsf.edu
+
+## References: 
+##
+##  Kober KM, Pogson G. Genome-wide signals of positive selection in 
+##      strongylocentrotid sea urchins.  BMC Genomics 2017;18:555. 
+##      PMID:28732465 PMCID: PMC5521101.
+##
+##  Saarman NP, Kober KM, Simison WB, Pogson GH. Sequence-Based Analysis 
+##      of Thermal Adaptation and Protein Energy Landscapes in an Invasive 
+##      Blue Mussel (Mytilus galloprovincialis). Genome Biol Evol. 
+##      2017;9(10):2739-51. PMID:28985307  PMCID: PMC5647807.
+##
+##  Kober KM, Bernardi G. Phylogenomics of strongylocentrotid sea urchins. 
+##      BMC Evol Biol. 2013;13:88. PMID:23617542  PMCID: PMC3637829.
+##
+
+import os,sys,subprocess,time,datetime
+import re,getopt,string,array,math,random
+import pkg_resources
+
+## https://github.com/pysam-developers/pysam
+import pysam
+
+## http://www.biopython.org
+from Bio.Seq import Seq
+from Bio.Alphabet import generic_dna
+
+## https://pypi.python.org/pypi/twobitreader/3.1.6
+import twobitreader
+
+VERSION=0.8  
+
+## Default values
+MINBASEQUAL=25
+MINMAPQ=25
+MINORALLELECOVERAGE=8
+MINORALLELEFREQ=0.126   ## >1/8
+
+CALLMINORALLELE=0
+CALLMAJORITYALLELE=0
+CALLHETEROZYGOTE=0
+CALLHETREF=0
+CALLHETREFALL=0
+CALLRANDOMFIXED=0
+
+REMOVESTOPCODON=0
+IGNOREPROPERPAIR=0
+
+TEST=0
+DEBUG=0
+
+BAMFILES_H={}
+TWOBIT=""
+GENEPRED_H={}
+GENESEQ_H={}
+GENEPREDNAME=""
+
+ambiguous_dna_values = {
+    "A": "A",
+    "C": "C",
+    "G": "G",
+    "T": "T",
+    "AC": "M",
+    "AG": "R",
+    "AT": "W",
+    "CG": "S",
+    "CT": "Y",
+    "GT": "K",
+    "ACG": "V",
+    "ACT": "H",
+    "AGT": "D",
+    "CGT": "B",
+    "ACGT": "N",
+    "N": "N"
+    }
+
+# http://docs.python.org/tutorial/stdlib.html
+def average(values):
+    """Computes the arithmetic mean of a list of numbers.
+
+    >>> print average([20, 30, 70])
+    40.0
+    """
+    return sum(values, 0.0) / len(values)
+    
+def collectBamFiles(bamListFile):
+    bamH = {}
+    listFP = open(bamListFile,"r")
+    for bam in listFP:
+        bamA=bam.strip("\n").split(",")
+        spp=bamA[0]
+        fname=bamA[1]
+        if DEBUG: print "[collectBamFiles] '"+fname+"'"
+        if not os.path.isfile(fname):
+            print os.path.isfile(fname),"Unable to locate BAM file:",fname
+            sys.exit(94)
+        bamH[spp]=fname
+    return bamH
+
+def loadGenePredH(gpFile):
+    if DEBUG: print "[loadGenePredH]",gpFile
+    gpH = {}
+    gpFP = open(gpFile,"r")
+    for gpS in gpFP:
+        gpA=gpS.strip("\n").split("\t")
+        gpA.pop(0)  # remove the bin column
+        if DEBUG: print "[loadGenePredH]",gpA
+        gpH['name']     =gpA[0]
+        gpH['chrom']    =gpA[1]
+        gpH['strand']   =gpA[2]
+        gpH['txStart']  = int(gpA[3])
+        gpH['txEnd']    = int(gpA[4])
+        gpH['cdsStart'] = int(gpA[5])
+        gpH['cdsEnd']   = int(gpA[6])
+        gpH['exonCount']    = int(gpA[7])
+        gpH['exonStarts']   = []
+        for start in gpA[8].split(','):
+            if not start=="":
+                gpH['exonStarts'].append(int(start))
+        gpH['exonEnds']     = []
+        for end in gpA[9].split(','):
+            if not end=="":
+                gpH['exonEnds'].append(int(end))
+    if len(gpH['exonStarts']) != len(gpH['exonEnds']):
+        print "[loadGenePredH] count of exonStarts != exonEnds"
+        sys.exit(129)
+    if len(gpH['exonStarts']) != gpH['exonCount']:
+        print "[loadGenePredH] count of exonStarts != exonCount"
+        sys.exit(130)
+    else:
+        print "[loadGenePredH] Found",gpH['exonCount'],"exons."
+    global GENEPREDNAME
+    GENEPREDNAME = gpH['name']
+    if DEBUG: print "[loadGenePredH]",gpH
+    return gpH
+
+def hashReferenceGene():
+    if DEBUG: print "[hashReferenceGene] Collecting reference sequence."
+    geneH={}
+    geneS=""
+    e=0
+    while e < GENEPRED_H['exonCount']:
+        
+        chrom=GENEPRED_H['chrom']
+        exonStart=GENEPRED_H['exonStarts'][e]
+        exonEnd=GENEPRED_H['exonEnds'][e]
+        if DEBUG: print "[hashReferenceGene] Querying:",chrom,e,exonStart,exonEnd
+        
+        
+        reference = twobitreader.TwoBitFile(TWOBIT)
+
+        try:
+            exonS = reference[chrom][exonStart:exonEnd].upper()
+        except RuntimeError,e:
+            print "[hashReferenceGene] twobitreader.TwoBitFile() Error:",e
+            if DEBUG: print "[hashReferenceGene] 2bit data:",len(exonS),"!=",exonStart-exonEnd, exonS
+            #continue
+        geneS+=exonS
+        if DEBUG: print "[hashReferenceGene]",chrom,e,exonStart,exonEnd,exonS
+        p=exonStart
+        for n in list(exonS):
+            geneH[int(p)]=n
+            p+=1
+        e+=1
+
+    
+    # reverse complement if on '-' strand
+    if GENEPRED_H['strand'] == '-':
+        my_seq=Seq(geneS, generic_dna)
+        geneS=my_seq.reverse_complement()
+    
+    if DEBUG: print sorted(geneH.keys())[0:10]
+    return geneH,geneS
+
+def generateConsensusForSpp(name):
+    conSeqH = {}
+    conSeqPolyH = {}
+    conSeqS = ""
+    conSeqPolyS = ""
+    baseCovCountsA=[]
+    statsH={}
+    statsH['minorAlleleCalls']=0
+    statsH['divergentAlleleCalls']=0
+    statsH['baseCalls']=0
+    statsH['totalBases']=0
+    statsH['multimapCount']=0
+    statsH['indelCount']=0
+    statsH['delCount']=0
+    statsH['biMorphCount']=0
+    statsH['triMorphCount']=0
+    statsH['polySiteCount']=0
+    statsH['siteCount']=0
+    
+    indelH={}
+    indelH['taxa']=name
+    indelH['indelSites']={}
+    
+    siteFreqFP = open("siteFreq_"+name+".txt","w")
+    
+    samfile = pysam.Samfile(BAMFILES_H[name], "rb" )
+    totalBases=0
+    
+    e=0
+    
+    while e < GENEPRED_H['exonCount']:
+        if DEBUG: print "[generateConsensusForSpp]\tStarting exon",e
+
+        chrom=GENEPRED_H['chrom']
+        exonStart=GENEPRED_H['exonStarts'][e]
+        exonEnd=GENEPRED_H['exonEnds'][e]
+        DELETION_DETECTED=0
+        for pileupcolumn in samfile.pileup(chrom, exonStart, exonEnd):
+            
+            ## only concern ourself with base calls in the region of interest
+            if pileupcolumn.pos < exonStart or pileupcolumn.pos >= exonEnd:
+                continue
+
+            if DEBUG: print "[generateConsensusForSpp]\tStarting new pileup column",pileupcolumn.pos
+            
+            ## make sure we have a reference sequence at this position
+            if not GENESEQ_H.has_key(pileupcolumn.pos):
+                print "[generateConsensusForSpp] Unable to locate site in reference", \
+                    pileupcolumn.pos,sorted(GENESEQ_H.keys())
+                sys.exit(82)
+                
+            if DEBUG:
+                print
+                print '[generateConsensusForSpp]',name,chrom,e,exonStart,exonEnd, \
+                    'coverage at base %s = %s' % (pileupcolumn.pos , pileupcolumn.n)
+            baseCovCountsA.append(pileupcolumn.n)
+            statsH['baseCalls']+=1
+            
+            myReadsH={}
+
+            ## Collect the counts of bases at this site from the aligned reads
+            if DEBUG: print "[generateConsensusForSpp]\tCollecting counts from pileup. Expected read count:", \
+                len(pileupcolumn.pileups)
+            siteH={ 'A':0, 'G':0, 'C':0, 'T':0, 'N':0 }
+            for pileupread in pileupcolumn.pileups:
+                
+                qname=pileupread.alignment.qname
+                if DEBUG: print '[generateConsensusForSpp]\tColumn',pileupcolumn.pos,\
+                    'Read name',qname,pileupread.query_position,len(pileupread.alignment.seq)
+                
+                ## only concern ourselves with proper paired reads
+                if not pileupread.alignment.is_proper_pair:
+                    if IGNOREPROPERPAIR:
+                        if DEBUG: print '[generateConsensusForSpp]\tRead is not in a proper pair. Including anyways (SE?).',qname
+                    else:
+                        if DEBUG: print '[generateConsensusForSpp]\tRead is not in a proper pair. Ingoring read (PE?).',qname
+                        continue
+                    
+                ## only concern ourselves with mapped reads
+                if not pileupread.alignment.mapq > MINMAPQ:
+                    if DEBUG: print '[generateConsensusForSpp]\tRead mapping quality is too low. Ingoring.',qname
+                    continue
+
+                ## check the type - this may fail if outside the range 
+                try:
+                    qbase=pileupread.alignment.seq[pileupread.query_position].upper()
+                    if DEBUG: print "[generateConsensusForSpp] \t index:", qname, pileupread.query_position
+                except TypeError:
+                    if DEBUG:
+                        print "[generateConsensusForSpp]\tWarning. Unknown index type (outside range?):", \
+                            type(pileupread.query_position)
+                        print '[generateConsensusForSpp] \tbase in read %s = %s %s ref = %s %s' \
+                            % (qname, pileupread.alignment.mapq, len(pileupread.alignment.seq),\
+                            pileupcolumn.pos, GENESEQ_H[pileupcolumn.pos])
+                    continue
+                    #sys.exit(146)
+                    
+                qqual=pileupread.alignment.qual[pileupread.query_position]
+                aqual=ord(qqual)-33     # assume Phred+33=ASCII (Sanger FASTQ) (0,41)
+                if DEBUG: print '[generateConsensusForSpp] \tbase in read %s = %s %s %s ref = %s' \
+                    % (qname, qbase, qqual, aqual, GENESEQ_H[pileupcolumn.pos])
+                
+                if pileupread.indel:
+                    if DEBUG: print '[generateConsensusForSpp]\tIs indel for',qname
+                    if not indelH['indelSites'].has_key(qname):
+                        indelH['indelSites'][qname]=[]
+                    indelH['indelSites'][qname].append(pileupcolumn.pos)
+                    statsH['indelCount']+=1
+                    if DEBUG: print '[generateConsensusForSpp] indel base in read %s = %s %s %s ref = %s %s' \
+                        % (qname, qbase, qqual, aqual,GENESEQ_H[pileupcolumn.pos], pileupcolumn.pos)
+                
+                    
+                if pileupread.is_del:
+                    if DEBUG: print '[generateConsensusForSpp]\tDeletion detected. Ignoring.',qname
+                    DELETION_DETECTED+=1
+                    statsH['delCount']+=1
+                    continue
+                    
+                statsH['totalBases']+=1
+                if DEBUG: print "[generateConsensusForSpp]\tEvaluating new allele.",pileupcolumn.pos,siteH
+                
+                ## Ignore bases of low quality
+                if aqual < MINBASEQUAL:
+                    if DEBUG: print '[generateConsensusForSpp] \tBase call quality score low. Ingoring.',qname, aqual
+                    siteH['N']+=1
+                    continue
+    
+                ## Check if duplicate name
+                if not myReadsH.has_key(qname):
+                    myReadsH[qname]={}
+                    myReadsH[qname]['qual']=aqual
+                    myReadsH[qname]['base']=qbase
+                else:
+                    statsH['multimapCount']+=1
+                    if DEBUG: print '[generateConsensusForSpp]\tRead',qname,'previously observed. Previous:', \
+                        myReadsH[qname]['qual'],myReadsH[qname]['base'],"Current:",qbase,aqual
+                    if qbase > myReadsH[qname]['qual']:
+                        ## remove count for previous read
+                        if DEBUG: print \
+                            '[generateConsensusForSpp]\tCurrent read has higher quality. Revoking previous reads base count.'
+                        siteH[myReadsH[qname]['base']]+=-1
+                    else:
+                        ## decrement the current call to zero sum the later count
+                        if DEBUG: print \
+                            '[generateConsensusForSpp]\Previous read has higher quality. Revoking current reads base count.'
+                        siteH[qbase]+=-1
+                        
+                ## count it
+                siteH[qbase]+=1
+                
+            
+            ## First, determine the most frequently occuring high quality base
+            if DEBUG: print "[generateConsensusForSpp]\tCollecting base counts.",siteH
+            highCount=0
+            highBase="N"
+            goodBaseCount=0
+            ## randomize the order of bases interogated, such that the last base in a tie
+            ## will be random
+            basesA=siteH.keys()
+            random.shuffle(basesA)
+            #for base,count in siteH.iteritems():
+            for base in basesA:
+                count=siteH[base]
+                if base != "N":
+                    goodBaseCount+=count
+                    #if count > 0:
+                    #    myResidues+=base
+                    if count>highCount:
+                        highBase=base
+                        highCount=count
+                #print highBase,highCount,base,count
+            #print "[generateConsensusForSpp]\tCounts:",highBase,highCount,goodBaseCount
+            #statsH['siteCoverageDepth']=goodBaseCount
+            
+            myResidues=""
+            ## Collect SNP information, residue frequencies
+            if DEBUG: print "[generateConsensusForSpp]\tCollecting base frequencies.",siteH
+            siteFreqH={}
+            siteFreqH['siteCoverageDepth']=goodBaseCount
+            if goodBaseCount>0:
+                for base,count in siteH.iteritems():
+                    
+                    if base != "N":
+                        baseFreq=float(count)/float(goodBaseCount)
+                        
+                        if baseFreq >= MINORALLELEFREQ:
+                            conSeqH[pileupcolumn.pos]=base
+                            myResidues+=base
+                            siteFreqH[base]=baseFreq
+                            statsH['minorAlleleCalls']+=1
+                            statsH['divergentAlleleCalls']+=1
+                            if DEBUG: print "[generateConsensusForSpp]\tSNP possible for", \
+                                name,pileupcolumn.pos,base,siteH,myResidues
+                        else:
+                            if DEBUG: print "[generateConsensusForSpp]\tAllele freq. too low for", \
+                                base,"baseFreq < MINORALLELEFREQ",baseFreq,MINORALLELEFREQ,myResidues
+                            siteFreqH[base]=0.0
+                    else:
+                        if DEBUG: print "[generateConsensusForSpp]\tIgnoring base",base,myResidues
+            
+            siteFreqFP.write(name+"\t"+str(pileupcolumn.pos)+"\t"+str(siteFreqH)+"\n")
+                             
+            myResidues = ''.join(sorted(myResidues))
+            if myResidues == "":
+                myResidues = "N"
+            if not ambiguous_dna_values.has_key(myResidues):
+                print "[generateConsensusForSpp] Error. Unidentified residue signature: '", \
+                    myResidues,"'",name,pileupcolumn.pos,highBase,base,siteH
+                sys.exit(201)
+            ambigCode = ambiguous_dna_values[myResidues]
+            
+            ##
+            if CALLHETEROZYGOTE:
+                if DEBUG: print "[generateConsensusForSpp]\tAmbiguity called method enabled.", \
+                    siteH,myResidues,ambigCode,name,pileupcolumn.pos,highBase,base
+                
+                if goodBaseCount >= MINORALLELECOVERAGE:
+                    if DEBUG: print "[generateConsensusForSpp]\tHave sufficient depth for SNP call: have", \
+                        goodBaseCount,"need",MINORALLELECOVERAGE
+                    
+                    myResiduesA = list(myResidues)
+                    if len(myResiduesA) > 1:
+                        if DEBUG: print "[generateConsensusForSpp]\tMultiple reliable bases at site.", \
+                            siteH,myResidues,ambigCode,name,pileupcolumn.pos,highBase,base
+                        statsH['polySiteCount']+=1
+                        if len(myResiduesA) == 2: statsH['biMorphCount']+=1
+                        if len(myResiduesA) == 3: statsH['triMorphCount']+=1
+                        
+                        ##
+                        if CALLHETREF:
+                            if DEBUG: print "[generateConsensusForSpp]\tReference SNP call enabled.", \
+                                siteH,myResidues,ambigCode,name,pileupcolumn.pos,highBase,base
+                            # check match to reference
+                            if myResidues.find(GENESEQ_H[pileupcolumn.pos]) >= 0:
+                                if DEBUG: print \
+                                    "[generateConsensusForSpp]\tReference base in SNP site - calling fixed as reference.", \
+                                    GENESEQ_H[pileupcolumn.pos],myResidues,ambigCode
+                                conSeqH[pileupcolumn.pos]=GENESEQ_H[pileupcolumn.pos]
+                            else:
+                                if DEBUG: print \
+                                    "[generateConsensusForSpp]\tNo reference base in SNP site - calling fixed randomly.", \
+                                    GENESEQ_H[pileupcolumn.pos],myResidues,ambigCode
+    
+                                random.shuffle(myResiduesA)
+                                conSeqH[pileupcolumn.pos]=myResiduesA.pop()
+                                conSeqPolyH[pileupcolumn.pos]=ambigCode
+                                
+                        elif CALLHETREFALL:
+                            if DEBUG: print \
+                                "[generateConsensusForSpp]\tReference SNP call enabled - calling all as reference.", \
+                                GENESEQ_H[pileupcolumn.pos],myResidues,ambigCode
+                            conSeqH[pileupcolumn.pos]=GENESEQ_H[pileupcolumn.pos]
+                            
+                        else:
+                            ## Call polymorphism as ambiguity code
+                            conSeqH[pileupcolumn.pos]=ambigCode
+                            conSeqPolyH[pileupcolumn.pos]=ambigCode
+                            
+                    else:
+                        if DEBUG: print "[generateConsensusForSpp]\tOne reliable base at site.", \
+                            siteH,myResidues,ambigCode,name,pileupcolumn.pos,highBase,base
+                        conSeqH[pileupcolumn.pos]=highBase
+                        conSeqPolyH[pileupcolumn.pos]=highBase
+                        
+                else:
+                    if DEBUG: print "[generateConsensusForSpp]\tToo few reliable bases for minor allele call. Have", \
+                        goodBaseCount,"need",MINORALLELECOVERAGE,"Calling high base ",highBase
+                    conSeqH[pileupcolumn.pos]=highBase
+                    conSeqPolyH[pileupcolumn.pos]=highBase
+            else:
+                if DEBUG: print "[generateConsensusForSpp]\tPolymorphism call disabled."
+            
+            ##
+            if CALLRANDOMFIXED:
+                myResiduesA = list(myResidues)
+                if DEBUG: print "[generateConsensusForSpp]\tRandom fixed call enabled.", \
+                    siteH,myResidues,ambigCode,name,pileupcolumn.pos,highBase,base,myResiduesA
+                random.shuffle(myResiduesA)
+                conSeqH[pileupcolumn.pos]=myResiduesA.pop()
+            else:
+                if DEBUG: print "[generateConsensusForSpp]\tRandom fixed call disabled."
+               
+            ## 
+            if CALLMAJORITYALLELE:
+                conSeqH[pileupcolumn.pos]=highBase
+            else:
+                if DEBUG: print "[generateConsensusForSpp]\tMajority allele call disabled."
+             
+            ##   
+            if CALLMINORALLELE:
+                if DEBUG: print "[generateConsensusForSpp]\tMinor allele call inquiry."
+                
+                # check match to reference
+                if highBase == GENESEQ_H[pileupcolumn.pos]:
+                    if DEBUG: print "[generateConsensusForSpp] Nothing happening here... move along."
+
+                else:
+                    if DEBUG: print "[generateConsensusForSpp]\tHigh base", \
+                        highBase,"already differs from ref",GENESEQ_H[pileupcolumn.pos]
+                    statsH['divergentAlleleCalls']+=1
+                
+                #if DEBUG: print '[generateConsensusForSpp]',name,pileupcolumn.pos, \
+                #    conSeqH[pileupcolumn.pos]+"/"+GENESEQ_H[pileupcolumn.pos],siteH
+            else:
+                if DEBUG: print "[generateConsensusForSpp]\tMinor divergent allele call disabled."
+                
+            
+            #if DELETION_DETECTED > 0:
+            #    if DEBUG: print '[generateConsensusForSpp]\tDeletion(s) detected. Ignoring site.', \
+            #       DELETION_DETECTED
+            #       conSeqH[pileupcolumn.pos]='N'
+            
+            statsH['siteCount']+=1
+            
+            if DEBUG: print '[generateConsensusForSpp]',name,pileupcolumn.pos, \
+                conSeqH[pileupcolumn.pos]+"/"+GENESEQ_H[pileupcolumn.pos],siteH
+            if conSeqH[pileupcolumn.pos]=="N":
+                print '[generateConsensusForSpp] unknown residue recorded',name,pileupcolumn.pos, \
+                    conSeqH[pileupcolumn.pos],GENESEQ_H[pileupcolumn.pos]
+                
+        ## add the exon to the consensus sequence
+        p=exonStart
+        while p < exonEnd:
+            
+            if conSeqH.has_key(p):
+                conSeqS+=conSeqH[p]
+            else:
+                conSeqS+='n'
+                
+            if conSeqPolyH.has_key(p):
+                conSeqPolyS+=conSeqPolyH[p]
+            else:
+                conSeqPolyS+='n'
+                
+            p+=1
+            
+        
+        # move on to the next exon
+        e+=1
+    
+    # DONE: reverse complement if on '-' strand
+    if GENEPRED_H['strand'] == '-':
+        my_seq=Seq(conSeqS, generic_dna)
+        conSeqS=my_seq.reverse_complement()
+        my_seq=Seq(conSeqPolyS, generic_dna)
+        conSeqPolyS=my_seq.reverse_complement()
+        
+    
+    #print conSeqS
+    if len(baseCovCountsA)>0:
+        statsH['averageCoverage']=average(baseCovCountsA)
+    else:
+        statsH['averageCoverage']=0
+    if DEBUG: print "[generateConsensusForSpp]",name,statsH,indelH
+    print "[generateConsensusForSpp] baseCalls",name,statsH['baseCalls']
+    print "[generateConsensusForSpp] siteCount",name,statsH['siteCount']
+    print "[generateConsensusForSpp] indelCount",name,statsH['indelCount']
+    
+    siteFreqFP.close()
+    samfile.close()
+    
+    return conSeqS,conSeqPolyS,statsH,indelH
+
+#### Do some basic test after installation #############################################
+def test(errorNum):
+    print "Python version: ",sys.version
+    print "Module version: twobitreader",pkg_resources.get_distribution("twobitreader").version
+    print "Module version: pysam",pkg_resources.get_distribution("pysam").version
+    print "Module version: biopython",pkg_resources.get_distribution("biopython").version
+    usage(errorNum)
+    return(errorNum)
+
+#### Give some usage information for this program #######################################
+def usageOld(errorNum):
+    print "marss - Build a multiple alignment of a gene prediction for BAM files"
+    print 
+    print "usage: marss [-vDh] -2 <genome 2bit file> -p <gene prediction file> -b <list of BAM file paths for each species> -m <method> -a <minor allele count> -f <minor allele freq> -q <min. map quality> -s <min. base quality>"
+    print
+    print "    Methods: mda       :   majority divergent allele"
+    print "             ma        :   majority allele"
+    print "             poly      :   polymorphic sites (default) "
+    print "                           [Require min.",MINORALLELECOVERAGE,"and freq.",MINORALLELEFREQ, \
+          " for consideration. Adjust with -q and -f.]"
+    print "             ref       :   polymorphic sites are called ref if seen, else highest represented."
+    print "                           [Require min.",MINORALLELECOVERAGE,"and freq.",MINORALLELEFREQ, \
+          " for consideration. Adjust with -q and -f.]"
+    print "             hetRefAll :   polymorphic sites are called ref. "
+    print "                           [Require min.",MINORALLELECOVERAGE,"and freq.",MINORALLELEFREQ, \
+          " for consideration. Adjust with -q and -f.]"
+    print "             fixed     :   randomly call a polymorphic site as fixed"
+    
+    sys.exit(errorNum)
+
+#### Give some usage information for this program #######################################
+def usage(errorNum):
+    a = """
+marss version X.X.X
+Copyright (C) 2010-2018 by Kord M. Kober
+<http://marss.XXX.org>
+
+marss comes with ABSOLUTELY NO WARRANTY.  This is free software, and you
+are welcome to redistribute it under certain conditions.  See the XXX
+XXX License for details.
+
+marss is a program to generate consensus coding sequences from whole-genome 
+reference alignments of short read sequences.   
+
+Usage: marss [OPTION]... 
+
+Options
+ -2, --genome2bit           genome 2bit file
+ -p, --genePredFile         gene prediction file
+ -b, --bamListFile          list of BAM file paths for each taxa
+ -m, --method               method to use for consensus call (described below)
+ -a, --minorAlleleCount     minimum minor allele count to include (8)
+ -f, --minorAlleleFreq      minimum minor allele frequency to include (0.126)
+ -q, --minMapQuality        minimum read mapping quality to include (25)
+ -s, --minBaseQuality       minimum base phread quality score to include (25)
+ -X, --removeStopCodon      truncate output sequences by 3 bases for codeml
+ -p, --ignoreProperPair     include all reads (ignore pairing status)
+ -T, --test                 perform reporting of prerequisite packages.
+ -D, --debug                set verbose output. You probably do not want to do this.
+(-h) --help                 show this help (-h works with no other options)
+
+Methods
+    mda       :   majority divergent allele
+    ma        :   majority allele
+    poly      :   polymorphic sites reported as IUPAC ambiguous code (default). 
+    ref       :   polymorphic sites are called ref if seen, else highest represented.
+    hetRefAll :   polymorphic sites are called ref. 
+    fixed     :   randomly call a polymorphic site as fixed
+"""
+    print(a)
+    sys.exit(errorNum)
+
+#### main #######################################
+def main(argv):
+
+    genome2bit=""
+    genePredFile=""
+    bamListFile=""
+    method=""
+    
+    try:
+        opts, args = getopt.getopt(argv, "hTD2:p:b:a:f:q:s:X:p:m:", \
+            ["help","test","debug","genome2bit","genePredFile","bamListFile","minorAlleleCount", \
+             "minorAlleleFreq","minMapQuality","minBaseQuality","removeStopCodon",\
+             "ignoreProperPair","method"])
+    except getopt.GetoptError:
+        usage(20)
+    for opt, arg in opts:
+        if opt in ("-h", "--help"):
+            usage(21) 
+        if opt in ("-T", "--test"):
+            global TEST
+            TEST = 1
+            print "[main] Test set."
+        if opt in ("-2", "--genome2bit"):
+            genome2bit = arg
+        if opt in ("-p", "--genePredFile"):
+            genePredFile = arg
+        if opt in ("-b", "--bamListFile"):
+            bamListFile = arg
+        if opt in ("-a", "--minorAlleleCount"):
+            global MINORALLELECOVERAGE
+            MINORALLELECOVERAGE=arg
+        if opt in ("-f", "--minorAlleleFreq"):
+            global MINORALLELEFREQ
+            MINORALLELEFREQ=arg
+        if opt in ("-q", "--minMapQuality"):
+            global MINMAPQ
+            MINMAPQ=arg
+        if opt in ("-s", "--minBaseQuality"):
+            global MINBASEQUAL
+            MINBASEQUAL=arg
+        if opt in ("-X", "--removeStopCodon"):
+            global REMOVESTOPCODON
+            REMOVESTOPCODON=arg
+        if opt in ("-p", "--ignoreProperPair"):
+            global IGNOREPROPERPAIR
+            IGNOREPROPERPAIR=arg
+        if opt in ("-m", "--method"):
+            method=arg
+            if method == "mda":
+                global CALLMAJORITYALLELE
+                CALLMAJORITYALLELE=1
+            elif method == "ma":
+                global CALLMINORALLELE
+                print "Minor allele calling for freq=",MINORALLELEFREQ,"and coverage=",MINORALLELECOVERAGE
+                CALLMINORALLELE=0
+            elif method == "poly":
+                global CALLHETEROZYGOTE
+                print "Calling heterozygote sites."
+                CALLHETEROZYGOTE=1
+            elif method == "ref":
+                global CALLHETREF
+                print "Calling reference fixed base for ref-inclusive high-quality heterozygote sites."
+                CALLHETEROZYGOTE=1
+                CALLHETREF=1
+            elif method == "hetRefAll":
+                global CALLHETREFALL
+                print "Calling reference fixed base for all high-quality heterozygote sites."
+                CALLHETEROZYGOTE=1
+                CALLHETREFALL=1
+            elif method == "fixed":
+                global CALLRANDOMFIXED
+                print "Calling random fixed base for low-quality heterozygote sites."
+                CALLRANDOMFIXED=1
+            else:
+                print "Unknown method",method
+                usage(45)
+        elif opt in ("-D", "--debug"):
+            global DEBUG
+            DEBUG = 1
+            print "[main] Debug set."
+    
+    if TEST:
+        test(99)
+
+    if genome2bit == "":
+        usage(33)
+    if genePredFile == "":
+        usage(34)
+    if bamListFile == "":
+        usage(35)
+    if method == "":
+        usage(36)
+    
+    if DEBUG:
+        test(99)
+
+    global TWOBIT
+    TWOBIT=genome2bit
+    print "Using 2bit:",TWOBIT
+
+    print "MINORALLELECOVERAGE", MINORALLELECOVERAGE
+    print "MINORALLELEFREQ", MINORALLELEFREQ
+    print "MINMAPQ", MINMAPQ
+    print "MINBASEQUAL", MINBASEQUAL
+    print "REMOVESTOPCODON", REMOVESTOPCODON
+    print "IGNOREPROPERPAIR", IGNOREPROPERPAIR
+    
+    global BAMFILES_H
+    BAMFILES_H=collectBamFiles(bamListFile)
+    print "Using",len(BAMFILES_H),"BAM files in:",bamListFile
+
+    global GENEPRED_H
+    GENEPRED_H=loadGenePredH(genePredFile)
+    print "Using gene pred",GENEPRED_H['name'],"from",genePredFile
+    global GENESEQ_H
+    GENESEQ_H,refGeneSeqS=hashReferenceGene()
+    print "Collected",len(GENESEQ_H.keys()),"sites from reference gene pred."
+    if DEBUG: print refGeneSeqS
+   
+    if DEBUG:
+        print "CALLMINORALLELE=",CALLMINORALLELE
+        print "CALLMAJORITYALLELE=",CALLMAJORITYALLELE
+        print "CALLHETEROZYGOTE=",CALLHETEROZYGOTE
+        print "CALLHETREF=",CALLHETREF
+        print "CALLHETREFALL=",CALLHETREFALL
+        print "CALLRANDOMFIXED=",CALLRANDOMFIXED
+
+    consensusH={}
+    consensusPolyH={}
+    statsSppH={}
+    indelSppH={}
+    for spp in BAMFILES_H.keys():
+        consensusH[spp],consensusPolyH[spp],statsSppH[spp],indelSppH[spp] = generateConsensusForSpp(spp)
+        if DEBUG: print ">"+spp+"\n"+consensusH[spp]
+        
+    consFastaFP=open("consensAlign.fa","w")
+    consFastaFP.write(">ref\n")
+    if REMOVESTOPCODON:
+        ## remove stop codon for pipelines with codeml
+        print "Truncating 3 nucleotides (stop codon) from sequences for codeml."
+        consFastaFP.write(str(refGeneSeqS[:-3])+"\n")
+        for spp,seq in consensusH.iteritems():
+            consFastaFP.write(">"+spp+"\n"+str(seq)[:-3]+"\n")
+    else:
+        consFastaFP.write(str(refGeneSeqS)+"\n")
+        for spp,seq in consensusH.iteritems():
+            consFastaFP.write(">"+spp+"\n"+str(seq)+"\n")
+    consFastaFP.close()
+    print "Wrote consensus alignment to file consensAlign.fa"
+    
+    if CALLHETREF:
+        consFastaPolyFP=open("consensAlignPoly.fa","w")
+        consFastaPolyFP.write(">ref\n")
+        ## remove stop codon for pipelines with codeml
+        consFastaPolyFP.write(str(refGeneSeqS[:-3])+"\n")
+        for spp,seq in consensusPolyH.iteritems():
+            consFastaPolyFP.write(">"+spp+"\n"+str(seq)[:-3]+"\n")
+        consFastaPolyFP.close()
+        print "Wrote polymorphic consensus alignment to file consensAlignPoly.fa"
+
+    if DEBUG: print("statsSppH keys:",statsSppH['sprp'].keys())
+    if DEBUG: print("statsSppH:",statsSppH['sprp'])
+    headerA=['baseCalls','delCount','polySiteCount','multimapCount','totalBases', \
+            'divergentAlleleCalls','averageCoverage','triMorphCount','siteCount','biMorphCount', \
+            'minorAlleleCalls','indelCount']
+    alignStatsFP=open("alignStats.txt","w")
+    alignStatsFP.write("taxa\t")
+    alignStatsFP.write("\t".join(headerA))
+    alignStatsFP.write("\n")
+    for spp,astatsH in statsSppH.iteritems():
+        lineA=[]
+        lineA.append(spp)
+        for k in headerA:
+            lineA.append(str(astatsH[k]))
+        alignStatsFP.write("\t".join(lineA))
+        alignStatsFP.write("\n")
+
+    if DEBUG: print("indelSppH keys:",indelSppH['sprp'].keys())
+    if DEBUG: print("indelSppH:",indelSppH['sprp'])
+    headerA=['taxa','readName','indelSites']
+    indelStatsFP=open("indelStats.txt","w")
+    indelStatsFP.write("\t".join(headerA))
+    indelStatsFP.write("\n")
+    for spp,istatsH in indelSppH.iteritems():
+        for rname,sitesA in istatsH['indelSites'].iteritems():
+            posA=list(sitesA)
+            for p in posA:
+                lineA=[]
+                lineA.append(spp)
+                lineA.append(rname)
+                lineA.append(str(p))
+                indelStatsFP.write("\t".join(lineA))
+                indelStatsFP.write("\n")
+    
+#### Start here. #######################################
+if __name__ == "__main__":
+    main(sys.argv[1:])
