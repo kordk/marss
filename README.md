@@ -78,7 +78,7 @@ Refer to INSTALL.txt at the project home page for help with installation of MARS
 
 indelInfo.txt :
 <pre>
-taxa   readName                                 indelSite
+taxa    readName                                indelSite
 sdro    HS3:171:d0le4acxx:1:1105:18332:137157   28503 
 sdro	HS3:171:d0le4acxx:1:1205:16883:73266	32073 
 sdro	HS3:171:d0le4acxx:1:1108:16497:10621	28503 
