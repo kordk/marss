@@ -1,0 +1,52 @@
+#First install MARSS following instructions in INSTALL.txt
+
+cd marss
+
+## generate the 2bit file from the reference FA file
+## into the demo directory
+cd data
+fa2twobit strPur4.local.1kb.fa ../demo/strPur4.local.1kb.2bit
+
+# To run demo:
+
+## From within the marss repository
+cd demo/SPU_009691
+
+## locate the reference 2 bit file:
+## strPur4.local.1kb.2bit
+
+## locate the GenePred file:
+## SPU_009691.local.ref.gp
+
+## locate the taxa name to BAM file mapping file
+## spp_to_bam.region.txt
+
+## To generate consensus alignment for this GenPred using the 'poly' method and capture stdout to a log file:
+../../src/marss \
+        -2 strPur4.local.1kb.2bit \
+	-p SPU_009691.local.ref.gp \
+	-b spp_to_bam.region.txt \
+	-m poly \
+	>marss.out
+
+## To see the output files created by marss:
+ls -1
+
+## locate the alignment file:
+## alignInfo.txt
+
+## locate the site file:
+## siteInfo.txt
+
+## To generate date for paralog test:
+../../src/prepareParalogData.py \
+        -a alignInfo.txt \
+        -s siteInfo.txt \
+        -g [name of gene being utilized]
+
+## To see the files created by prepareParalogData.py:
+ls -1
+
+## To run paralog test:
+../../src/paralogTest.py \
+        -a alignStatsSummary.csv

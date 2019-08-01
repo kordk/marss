@@ -1,0 +1,35 @@
+## Tested on Ubuntu LTS 16.04.1
+## Currenty only supports Python 2.7
+
+## I. Install interpreter and required packages
+
+## Python 2.7
+## https://www.python.org/downloads/
+
+## Python packages
+
+## pysam
+## https://github.com/pysam-developers/pysam
+
+## twobitreader
+## https://pypi.python.org/pypi/twobitreader/3.1.6
+
+## BioPython
+## http://www.biopython.org
+
+## UCSC kent src tools - faTo2bit
+## http://hgdownload.soe.ucsc.edu/admin/exe/
+
+## II. Download and test MARSS
+
+## install with git
+git clone https://github.com/kordk/marss.git
+
+## make sure the file is executable (if desired)
+chmod 755 src/marss
+
+## Test the installation
+python2.7 src/marss -T
+
+## See DEMO.txt for a example of how to prepare the files and run marss
+
