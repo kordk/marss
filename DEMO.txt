@@ -47,6 +47,9 @@ ls -1
 ## To see the files created by prepareParalogData.py:
 ls -1
 
+## locate the paralog data file:
+## alignStatsSummary.csv
+
 ## To run paralog test:
 ../../src/paralogTest.py \
         -a alignStatsSummary.csv
