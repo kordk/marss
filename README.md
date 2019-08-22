@@ -1,7 +1,7 @@
 # MARSS
 Multiple Alignment of Reference and Short readS
 
-MARSS is a tool developed to generate Multiple Species Consensus Alignments and quality control statistics for comparative genomics analyses of regions of a reference genome from aligned reads. MARSS was developed with high throughput in mind and can be implemented in high performance computing environment for compatative genome analyses using next-generation short read technology.
+MARSS is a tool developed to generate Multiple Species Consensus Alignments and quality control statistics for comparative genomics analyses of regions of a reference genome from aligned reads. It also implements a test to identify and score potential paralogs in whole genome or transcriptome sequencing comparative genomics studies. MARSS was developed with high throughput in mind and can be implemented in high performance computing environment for compatative genome analyses using next-generation short read technology.
 
 ## Requirements
      - Python 2.7
@@ -148,15 +148,23 @@ sdro	35548	   0.0	           1.0              0.0    0.0   42
 ## Testing
 Refer to the DEMO.txt file at the project home page (http://github.net/kordk/marss) in order to see how to run a demo of MARSS.
 
+## Examples of studies which used MARSS
+
+Kober KM, Bernardi G. Phylogenomics of strongylocentrotid sea urchins. BMC Evolutionary Biology. 2013. 13:88. <a href="https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3637829"> PMC3637829</a>.
+
+Kober KM, Bernardi G. Erratum to: Phylogenomics of strongylocentrotid sea urchins. BMC Evol Biol. 2017 Feb 13; 17(1):50. <a href="https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5307700">PMC5307700</a>.
+
+Kober KM, Pogson GH. Genome-wide signals of positive selection in strongylocentrotid sea urchins. BMC Genomics. 2017 07 21; 18(1):555. <a href="https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5521101"> PMC5521101</a>.
+
+Saarman NP, Kober KM, Simison WB, Pogson GH. Sequence-Based Analysis of Thermal Adaptation and Protein Energy Landscapes in an Invasive Blue Mussel (Mytilus galloprovincialis). Genome Biol Evol. 2017 Oct 01; 9(10):2739-2751. <a href="https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5647807"> PMC5647807</a>.
+
 ## Authors
-Kord Kober :
-kord.kober@ucsf.edu
+Kord Kober : kord.kober@ucsf.edu
 
-Samantha Danison :
-samanthadanison00@gmail.com
+Samantha Danison : samanthadanison00@gmail.com
 
-Grant Pogson : 
-pogson@ucsf.edu
+Grant Pogson :  pogson@ucsf.edu
 
 ## Acknowledgements
 
+Funding for sea urchin data collection was provided by the National Science Foundation (DEB-1011061), the STEPS Foundation, Friends of Long Marine Lab, and the Myer’s Trust. The funding bodies did not participate in the design of the study or collection, analysis, and interpretation of data or in writing the software. We are extremely grateful to Giacomo Bernardi for advice and guidance on the development and evaluation of the evolutionary analyses. 
