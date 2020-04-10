@@ -1,0 +1,1068 @@
+#!/usr/local/bin/python2.7
+
+VERSION="0.9.0"
+## 2020-Apr-09 - kord.kober@ucsf.edu - Adding to marss repository
+## 2016-Feb-29 - kord.kober@ucsf.edu - Adding support for parallel processing of samples with pp
+## 2016-Mar-09 - kord.kober@ucsf.edu - Added configuration support for number of cores.
+## 2016-Apr-05 - kord.kober@ucsf.edu - Adding preliminary support for Glycan motif identification.
+## 2016-Apr-08 - kord.kober@ucsf.edu - Adding TESTMODE flag and basic support.
+##                                   - Added 3-codon sliding Glycan motif candidate tracking.
+## 2016-Apr-13 - kord.kober@ucsf.edu - Added code to delete members from earlier codon positions (free memory).
+## 2016-Apr-16 - kord.kober@ucsf.edu - Added option to select Glycan Motif code.
+## 2016-Sep-20 - kord.kober@ucsf.edu - Added Glycan Motif test.
+##                                   - Added Glycan Motif summary report.
+## 2016-Sep-20 - kord.kober@ucsf.edu - Added to kord@frink:~/scripts GIT repository
+
+import os,sys,subprocess,time,datetime
+import re,getopt,string,array,math,random
+import pp
+
+# http://www.cgat.org/~andreas/documentation/pysam/contents.html
+import pysam
+
+# http://www.biopython.org
+from Bio.Seq import Seq
+from Bio.Alphabet import generic_dna
+from Bio.Alphabet import IUPAC
+
+#  http://pypi.python.org/packages/source/t/twobitreader/twobitreader-2.4.tar.gz
+import twobitreader
+
+DEBUG=0
+TESTMODE=0
+NUMCPU=1
+
+globalParametersH = {
+    'MINBASEQUAL':          25,
+    'MINMAPQ':              25,
+    'MINORALLELECOVERAGE':  8,
+    'MINORALLELEFREQ':      0.126,
+
+    'CALLMINORALLELE':      0,
+    'CALLMAJORITYALLELE':   0,
+    'CALLHETEROZYGOTE':     0,
+    'CALLHETREF':           0,
+    'CALLHETREFALL':        0,
+    'CALLRANDOMFIXED':      0,
+    
+    'DEBUG':                0,
+    'GLYCANMOTIF':          0,
+    
+    'BAMFILES_H':           {},
+    'TWOBIT':               "",
+    'GENEPRED_H':           {},
+    'GENESEQ_H':            {},
+    'GENEPREDNAME':         "",
+    'TWOBIT':               ""
+
+    }
+
+ambiguous_dna_values = {
+    "A": "A",
+    "C": "C",
+    "G": "G",
+    "T": "T",
+    "AC": "M",
+    "AG": "R",
+    "AT": "W",
+    "CG": "S",
+    "CT": "Y",
+    "GT": "K",
+    "ACG": "V",
+    "ACT": "H",
+    "AGT": "D",
+    "CGT": "B",
+    "ACGT": "N",
+    "N": "N"
+    }
+
+# http://docs.python.org/tutorial/stdlib.html
+def average(values):
+    """Computes the arithmetic mean of a list of numbers.
+
+    >>> print average([20, 30, 70])
+    40.0
+    """
+    return sum(values, 0.0) / len(values)
+    
+def collectBamFiles(bamListFile):
+    bamH = {}
+    listFP = open(bamListFile,"r")
+    for bam in listFP:
+        bamA=bam.strip("\n").split(",")
+        spp=bamA[0]
+        fname=bamA[1]
+        if DEBUG: print "[collectBamFiles] '"+fname+"'"
+        if not os.path.isfile(fname):
+            print os.path.isfile(fname),"Unable to locate BAM file:",fname
+            sys.exit(94)
+        bamH[spp]=fname
+    return bamH
+
+def loadGenePredH(gpFile):
+    if DEBUG: print "[loadGenePredH]",gpFile
+    gpH = {}
+    gpFP = open(gpFile,"r")
+    for gpS in gpFP:
+        gpA=gpS.strip("\n").split("\t")
+        gpA.pop(0)  # remove the bin column
+        if DEBUG: print "[loadGenePredH]",gpA
+        gpH['name']     =gpA[0]
+        gpH['chrom']    =gpA[1]
+        gpH['strand']   =gpA[2]
+        gpH['txStart']  = int(gpA[3])
+        gpH['txEnd']    = int(gpA[4])
+        gpH['cdsStart'] = int(gpA[5])
+        gpH['cdsEnd']   = int(gpA[6])
+        gpH['exonCount']    = int(gpA[7])
+        gpH['exonStarts']   = []
+        for start in gpA[8].split(','):
+            if not start=="":
+                gpH['exonStarts'].append(int(start))
+        gpH['exonEnds']     = []
+        for end in gpA[9].split(','):
+            if not end=="":
+                gpH['exonEnds'].append(int(end))
+    
+    if DEBUG: print "[loadGenePredH]",gpH
+    return gpH,gpH['name']
+
+def hashReferenceGene(globalParametersH):
+    if DEBUG: print "[hashReferenceGene] Collecting reference sequence."
+    GENEPRED_H=globalParametersH['GENEPRED_H']
+    TWOBIT=globalParametersH['TWOBIT']
+    
+    geneH={}
+    geneS=""
+    
+    e=0
+    while e < GENEPRED_H['exonCount']:
+        
+        chrom=GENEPRED_H['chrom']
+        exonStart=GENEPRED_H['exonStarts'][e]
+        exonEnd=GENEPRED_H['exonEnds'][e]
+        
+        reference = twobitreader.TwoBitFile(TWOBIT)
+        exonS = reference[chrom][exonStart:exonEnd].upper()
+        geneS+=exonS
+        if DEBUG: print "[hashReferenceGene]",chrom,e,exonStart,exonEnd,exonS
+        p=exonStart
+        for n in list(exonS):
+            geneH[int(p)]=n
+            p+=1
+        e+=1
+
+    
+    # reverse complement if on '-' strand
+    if GENEPRED_H['strand'] == '-':
+        my_seq=Seq(geneS, generic_dna)
+        geneS=my_seq.reverse_complement()
+    
+    if DEBUG: print sorted(geneH.keys())[0:10]
+    return geneH,geneS
+
+##
+## process_pileupcolumn()
+##
+def process_pileupcolumn(globalParametersH,bamfile_iter,v,readCodonH):
+    DEBUG=globalParametersH['DEBUG']
+    
+    MINMAPQ=globalParametersH['MINMAPQ']
+    MINBASEQUAL=globalParametersH["MINBASEQUAL"]
+    TESTMODE=globalParametersH['TESTMODE']
+                                   
+    if DEBUG: print "[process_pileupcolumn]",v,type(bamfile_iter)
+    #print "[process_pileupcolumn] globalParametersH:",globalParametersH
+    
+    for pileupcolumn in bamfile_iter:
+        
+        ## only concern ourself with base calls in the region of interest
+        if pileupcolumn.pos != v:
+            if DEBUG: print "[process_pileupcolumn]\tIgnoring undesired pileup coordinate.",pileupcolumn.pos
+            continue
+
+        if DEBUG: print "[process_pileupcolumn]\tCollecting base calls from pileup.",pileupcolumn.pos,pileupcolumn.n
+    
+        if DEBUG: print "[process_pileupcolumn]\tPadding reads not in this pileup.",pileupcolumn.pos,pileupcolumn.n,len(readCodonH)
+        
+        missingReadsH=dict.fromkeys(readCodonH.keys())  ## get a dict of all reads
+        for pileupread in pileupcolumn.pileups:
+            qname=pileupread.alignment.qname
+            
+            if missingReadsH.has_key(qname):
+                del missingReadsH[qname]    ## remove any in the pileup
+    
+           
+        if DEBUG: print "[process_pileupcolumn]\tPadding",len(missingReadsH),"/",len(readCodonH),"unique reads not in this pileup."
+        if DEBUG: print "[process_pileupcolumn]\t",missingReadsH
+        myReadsH={}
+        for qname in missingReadsH:
+            if not myReadsH.has_key(qname):
+                readCodonH[qname]+='N'      ## only pad each read once
+                if DEBUG: print "[process_pileupcolumn]\tPadded",qname,readCodonH[qname]
+            else:
+                if DEBUG: print "[process_pileupcolumn]\tPreviously padded",qname,readCodonH[qname]
+        
+        if DEBUG: print "[process_pileupcolumn]\tPadding completed?",readCodonH 
+        
+        myReadsH={}     ## re-initialize
+        ignoreReadsH={}
+                
+        siteH={ 'A':0, 'G':0, 'C':0, 'T':0, 'N':0 }
+        
+        for pileupread in pileupcolumn.pileups:
+            
+            ## only concern ourself with base calls in the region of interest
+            #if pileupcolumn.pos < exonStart or pileupcolumn.pos >= exonEnd:
+            #    continue
+                
+            qname=pileupread.alignment.qname
+            
+            if not readCodonH.has_key(qname):
+                readCodonH[qname]=""        ## add any that slipped by the fetch() method
+                if DEBUG: print "[process_pileupcolumn]\tRead slipped by fetch() method.",qname
+                
+            ## only concern ourselves with proper paired reads
+            if not pileupread.alignment.is_proper_pair:
+                if not ignoreReadsH.has_key(qname):
+                    ignoreReadsH[qname]=""
+                    readCodonH[qname]+='N'    ## concatenate the nucleotide to the codon for the read
+    
+                if DEBUG: print '[process_pileupcolumn]\tRead is not in a proper pair. Ingoring.',qname,readCodonH[qname],pileupread.query_position
+                continue
+                
+            ## only concern ourselves with mapped reads
+            if not pileupread.alignment.mapq > MINMAPQ:
+                if not ignoreReadsH.has_key(qname):
+                    ignoreReadsH[qname]=""
+                    readCodonH[qname]+='N'    ## concatenate the nucleotide to the codon for the read
+                    
+                if DEBUG: print '[process_pileupcolumn]\tRead mapping quality is too low. Ingoring.',qname,readCodonH[qname],pileupread.query_position
+                continue
+            
+            if pileupread.indel:
+                if DEBUG: print '[process_pileupcolumn]\tIs indel for',qname
+                
+            if pileupread.is_del:
+                if DEBUG: print '[process_pileupcolumn]\tDeletion detected. Ignoring.',qname
+                #DELETION_DETECTED+=1
+                continue
+                
+            #statsH['totalBases']+=1
+            if DEBUG: print "[process_pileupcolumn]\tStarting new site.",siteH,pileupcolumn.pos,pileupread.query_position,pileupread.alignment.pos
+            
+            qbase=pileupread.alignment.seq[pileupread.query_position].upper()
+            qqual=pileupread.alignment.qual[pileupread.query_position]
+            aqual=ord(qqual)-33     # assume Phred+33=ASCII (Sanger FASTQ) (0,41)
+            #if DEBUG: print '[process_pileupcolumn] \tbase in read %s = %s %s %s ref = %s %d' % (qname, qbase, qqual, aqual,GENESEQ_H[pileupcolumn.pos],pileupread.query_position)
+            
+            ## Ignore bases of low quality
+            if aqual < MINBASEQUAL:
+                siteH['N']+=1
+                readCodonH[qname]+='N'    ## concatenate the nucleotide to the codon for the read
+                if DEBUG: print '[process_pileupcolumn] \tBase call quality score low. Ingoring.',MINBASEQUAL,qname,readCodonH[qname]
+                continue
+    
+            ## Check if duplicate name
+            if not myReadsH.has_key(qname):
+                myReadsH[qname]={}
+                myReadsH[qname]['qual']=aqual
+                myReadsH[qname]['base']=qbase
+            else:
+                #statsH['duplicate_seen']+=1
+                if DEBUG: print '[process_pileupcolumn]\tRead',qname,'previously observed. Previous:',myReadsH[qname]['qual'],myReadsH[qname]['base'],"Current:",qbase,aqual
+                if qbase > myReadsH[qname]['qual']:
+                    ## remove count for previous read
+                    if DEBUG: print '[process_pileupcolumn]\tCurrent read has higher quality. Revoking previous reads base count.'
+                    siteH[myReadsH[qname]['base']]+=-1
+                    ## remove previous base call and make space to use this one
+                    myCodonA=list(readCodonH[qname])
+                    myCodonA.pop()
+                    readCodonH[qname]="".join(myCodonA)
+                else:
+                    ## decrement the current call to zero sum the later count
+                    if DEBUG: print '[generateConsensusForSpp]\Previous read has higher quality. Revoking current reads base count.'
+                    siteH[qbase]+=-1
+                    
+            ## record the base
+            readCodonH[qname]+=qbase    ## concatenate the nucleotide to the codon for the read
+            siteH[qbase]+=1             ## count it at the nucleotide level
+            if TESTMODE: 
+                if siteH[qbase]==100:
+                    print "[process_pileupcolumn] WARNING. IN TEST MODE. ONLY EXAMINING FIRST 100 READS. THIS IS PROBABLY NOT WHAT YOU WANT."
+                    break
+            sys.stdout.flush()
+            
+    print "[process_pileupcolumn]\tReturning siteH", v,siteH
+    if DEBUG: print "[process_pileupcolumn] Returning myReadsH", myReadsH
+    if DEBUG: print "[process_pileupcolumn] Returning readCodonH", readCodonH
+        
+    return siteH,readCodonH
+
+
+#def generateConsensusForSpp2(name,statsH):
+def generateConsensusForSpp2(globalParametersH,name):
+    
+    DEBUG=globalParametersH['DEBUG']
+    BAMFILES_H=globalParametersH['BAMFILES_H']
+    GENEPRED_H=globalParametersH['GENEPRED_H']
+    GENESEQ_H=globalParametersH['GENESEQ_H']
+    #refGeneSeqS=globalParametersH['refGeneSeqS']
+    CALLMAJORITYALLELE=globalParametersH['CALLMAJORITYALLELE']
+    CALLHETREF=globalParametersH['CALLHETREF']
+    MINORALLELEFREQ=globalParametersH['MINORALLELEFREQ']
+    MINORALLELECOVERAGE=globalParametersH['MINORALLELECOVERAGE']
+    TESTMODE=globalParametersH['TESTMODE']
+    GLYCANMOTIF=globalParametersH['GLYCANMOTIF']
+    
+    import pysam
+    from Bio.Seq import Seq
+    from Bio.Alphabet import generic_dna
+    from Bio.Alphabet import IUPAC
+    import twobitreader
+
+    e=0     ## exon index
+    i=1     ## nucleotide in gene index (start at one)
+    c=1     ## codon index (start at one)
+    
+    statsH={}
+    conSeqCodS=""
+    statsH[name]={}
+    statsH[name]['codonCount']=0
+    statsH[name]['hetCount']=0
+    statsH[name]['hetSitesConserv']=[]
+    statsH[name]['hetSitesSilent']=[]
+    statsH[name]['hetSitesReplace']=[]
+    statsH[name]['polyAlleleCount']=0
+    statsH[name]['polyAlleleSites']=[]
+    statsH[name]['nnnCount']=0
+    statsH[name]['nnnSites']=[]
+        
+    
+    readCodonH={}   ## hash of read-specific codon
+    
+    PILEUP_AT_REF_POS=0
+    
+    ## Open the BAM file
+    bamfile = pysam.Samfile(BAMFILES_H[name], "rb" )
+    
+    ## Open the observed codon report
+    obsCodonFP = open("obsCodons_"+name+".txt","w")
+    headA=["codonNum","pos","exonNum","chosenCodon","obsCodonCounts"] 
+    line="\t".join(lineA)
+    obsCodonFP.write(line+"\n")
+    
+    refCodon=""
+    
+    sys.stdout.flush()
+    
+    if GLYCANMOTIF:
+        import re
+        glycanMotifH={}
+        glycanMotifStatsH={}
+        glycanMotifStatsH[name]={}
+        glycanMotifFreqH={}
+        
+        
+        ## initial some items for the global stat report
+        statsH[name]['motifCount_NXT']=0
+        statsH[name]['motifSites_NXT']={}
+        statsH[name]['motifCount_NXS']=0
+        statsH[name]['motifSites_NXS']={}
+    
+        glycanMotifFP = open("glycanMotif_"+name+".txt","w")
+        lineA=[]
+        lineA.append("codonStart")
+        lineA.append("codonEnd")
+        lineA.append("exonNumber")
+        lineA.append("siteStart")
+        lineA.append("readName")
+        lineA.append("glycanMotif")
+        lineA.append("glycanMotifDetail")
+        lineA.append("motifScore")
+        line="\t".join(lineA)
+        glycanMotifFP.write(line+"\n")
+        
+    ## process one exon at a time
+    while e < GENEPRED_H['exonCount']:
+        
+        chrom=GENEPRED_H['chrom']
+        strand=GENEPRED_H['strand']
+        exonStart=GENEPRED_H['exonStarts'][e]
+        exonEnd=GENEPRED_H['exonEnds'][e]
+        
+        print "[generateConsensusForSpp2] Processing exon",name,e,chrom,exonStart,exonEnd
+        
+        ## identify the reads covering exon
+        for alread in bamfile.fetch(chrom, exonStart, exonEnd):
+            if DEBUG: print "[generateConsensusForSpp2] Identified aligned Read for region",e,alread.qname
+            if not readCodonH.has_key(alread.qname):
+                readCodonH[alread.qname]=""
+        print "[generateConsensusForSpp2] Found",len(readCodonH),"aligned reads for exon",e
+        if DEBUG: print "[generateConsensusForSpp2]\t",readCodonH
+        
+        v=exonStart
+        while (v < exonEnd):
+            
+            #print "[generateConsensusForSpp2] ----------------------------------------------------"
+            print "[generateConsensusForSpp2] *** Interrogating reference coordinate,",name,chrom,e,c,v
+            #i+=1    ## increment the nucleotide position
+
+            ## Check to see if there is a pileup at this reference position - BUG misses the gaps
+            bamfile_iter=bamfile.pileup(chrom, v, v+1)
+            b=0
+            for pileupcolumn in iter(bamfile_iter):
+                b+=1
+            if b>0:
+                if DEBUG: print "[generateConsensusForSpp2] Found pileup at coordinate",name,chrom,e,exonStart,v,exonEnd,b,c
+                PILEUP_AT_REF_POS=1
+            else:
+                if DEBUG: print "[generateConsensusForSpp2] Missing pileup at coordinate",name,chrom,e,exonStart,v,exonEnd,b,c,"-"
+                PILEUP_AT_REF_POS=0
+            
+            sys.stdout.flush()
+            ## Process the nucleotide position
+            if PILEUP_AT_REF_POS:
+                if DEBUG: print "[generateConsensusForSpp2]\t-> pileup column"
+                bamfile_iter=bamfile.pileup(chrom, v, v+1)
+                process_pileupcolumn(globalParametersH,bamfile_iter, v,readCodonH)
+                sys.stdout.flush()
+                
+            else:
+                print "[generateConsensusForSpp2]\t-> gap column",v
+            
+            ##### Codon level work #####
+                            
+            codonInProg = i % 3
+            refCodon+=GENESEQ_H[v]
+            if DEBUG: print '[generateConsensusForSpp2]\t',name,'Codon check: ',e,v,i,c,codonInProg,refCodon,readCodonH
+            
+            if codonInProg == 0:
+                ## select the majority codon observed
+                obsCodonH={}
+                        
+                for read,codon in readCodonH.iteritems():
+                    ## require a complete codon length
+                    if not len(codon) == 3:
+                        if DEBUG: print "[generateConsensusForSpp2] ",name,"Codon illegal (too short? after gap?)",i,c,e,v,read,codon
+                        continue
+                    
+                    ## exclude codons having an "N"
+                    HAS_N=0
+                    codonA=list(codon)
+                    for base in codonA:
+                        if base=='N':
+                            HAS_N=1
+                    if HAS_N:
+                        continue
+                    
+                    if not obsCodonH.has_key(codon):
+                        obsCodonH[codon]=0
+    
+                    ##
+                    ## N-linked glycosylation motif
+                    ##
+                    ## check for asparagine ("N")
+                    ## log the codon and read for future use
+                    ## i.e., if N found:
+                    #       start new codon triplet at that codon position for that read
+                    ##      record the next two amino acids
+                    ##      identify as glycan motif (N*S || N*T) or not
+                    ##      count the number of reads supporting the motif
+                    ##
+                    ## NOTE: this currently only tested for the forward strand
+                    ## NOTE: this is too memory intensive for high coverage (>10,000 reads?)
+                    ##
+                    if not GLYCANMOTIF:
+                        if DEBUG: print "[generateConsensusForSpp2] Skipping glycan motif evaluation."
+                    else:
+                        if DEBUG: print "[generateConsensusForSpp2] Evaluating for glycan motif."
+                        coding_dna=Seq(codon, IUPAC.unambiguous_dna)
+                        aa=str(coding_dna.translate())
+                        print '[generateConsensusForSpp2]\t',name,'Codon translation check: ',e,v,i,c,codonInProg,refCodon,read,codon,aa
+                                
+
+                        if not glycanMotifFreqH.has_key(c):
+                            glycanMotifFreqH[c]={}
+                            glycanMotifFreqH[c]['totalCount']=0
+                            glycanMotifFreqH[c]['glycanCount']=0
+                            
+                        ## start a new motif candidate
+                        print "[generateConsensusForSpp2] Starting new motif:",c,read,codon,aa
+                        if not glycanMotifH.has_key(c):
+                            glycanMotifH[c]={}
+                        if not glycanMotifH[c].has_key(read):
+                            glycanMotifH[c][read]=aa+str(c)
+                            print "[generateConsensusForSpp2] started motif candidate:",aa,c,read,glycanMotifH[c][read]
+                                    
+                        
+                        ## are we in a current motif candidate (2nd)?
+                        if glycanMotifH.has_key(c-1):
+                            if DEBUG: print "[generateConsensusForSpp2] had motif candidate:",aa,c,read,glycanMotifH[c-1]
+                            if glycanMotifH[c-1].has_key(read):
+                                #print "[generateConsensusForSpp2] inside motif candidate (2nd):",read,glycanMotifH[c-1][read]
+                                glycanMotifH[c-1][read]+=aa+str(c)
+                                print "[generateConsensusForSpp2] extended motif candidate (2nd):",aa,c,read,glycanMotifH[c-1][read]
+                                
+                        ## are we in a current motif candidate (3rd)?       
+                        if glycanMotifH.has_key(c-2):
+                            if glycanMotifH[c-2].has_key(read):
+                                if DEBUG: print "[generateConsensusForSpp2] inside motif candidate (3rd):",read,glycanMotifH[c-2][read]
+                                ## record the motif candidate
+                                glycanMotifH[c-2][read]+=aa+str(c)
+                                glycanMotifFreqH[c-2]['totalCount']+=1
+                                print "[generateConsensusForSpp2] extended motif candidate (3rd):",aa,c,read,glycanMotifH[c-2][read],"glycanMotifFreqH totalCount:",glycanMotifFreqH[c]['totalCount']
+                                
+                                ## Glycan motif?
+                                MOTIFSCORE=0
+                                motif=re.sub('\d', '', glycanMotifH[c-2][read])
+                                print "[generateConsensusForSpp2] motif:",motif
+                                motifA=list(motif)
+                                if len(motifA) != 3:
+                                    print "[generateConsensusForSpp2] Warning. motif incorrect length",motif,motifA
+                                else:
+                                    if DEBUG: print "[generateConsensusForSpp2] motif correct length",motif,motifA
+                                    
+                                    if motifA[0] != "N":
+                                        print "[generateConsensusForSpp2] Not a glycan motif",motif,motifA
+                                    else:
+                                        ## glycan motif (N*S || N*T) 
+                                        
+                                        if motifA[2] == "S":
+                                            print "[generateConsensusForSpp2] motif identified (N*S)",motif,motifA
+                                            MOTIFSCORE=1
+                                            if not glycanMotifStatsH[name].has_key('motifCount_NXS'):
+                                                glycanMotifStatsH[name]['motifCount_NXS']=0
+                                            glycanMotifStatsH[name]['motifCount_NXS']+=1
+                                            if not glycanMotifStatsH[name].has_key('motifSites_NXS'):
+                                                glycanMotifStatsH[name]['motifSites_NXS']={}
+                                            glycanMotifStatsH[name]['motifSites_NXS'][c-2]=0
+                                            statsH[name]['motifSites_NXS'][c-2]=0
+                                            
+                                            
+                                        if motifA[2] == "T":
+                                            print "[generateConsensusForSpp2] motif identified (N*T)",motif,motifA
+                                            MOTIFSCORE=1
+                                            if not glycanMotifStatsH[name].has_key('motifCount_NXT'):
+                                                glycanMotifStatsH[name]['motifCount_NXT']=0
+                                            glycanMotifStatsH[name]['motifCount_NXT']+=1
+                                            if not glycanMotifStatsH[name].has_key('motifSites_NXT'):
+                                                glycanMotifStatsH[name]['motifSites_NXT']={}
+                                            glycanMotifStatsH[name]['motifSites_NXT'][c-2]=0
+                                            statsH[name]['motifSites_NXT'][c-2]=0
+                                        
+                                ## write to file
+                                if MOTIFSCORE==1:
+                                    ## record the motif hit
+                                    glycanMotifFreqH[c-2]['glycanCount']+=1
+                                    print "[generateConsensusForSpp2] glycan motif identified:",aa,c,read,"glycanMotifFreqH glycanCount:",glycanMotifFreqH[c]['glycanCount']
+                                
+                                    lineA=[]
+                                    lineA.append(str(c-2))
+                                    lineA.append(str(c))
+                                    lineA.append(str(e))
+                                    lineA.append(str(v))
+                                    lineA.append(read)
+                                    lineA.append(motif)
+                                    lineA.append(glycanMotifH[c-2][read])
+                                    lineA.append(str(MOTIFSCORE))
+                                    line="\t".join(lineA)
+                                    glycanMotifFP.write(line+"\n")
+                        
+                        ## delete old motifs for memory usage
+                        if glycanMotifH.has_key(c-3):
+                            del glycanMotifH[c-3]
+                    
+                    sys.stdout.flush()
+                    
+                    obsCodonH[codon]+=1
+                
+                totalCount=0
+                for myCodon,myCount in obsCodonH.iteritems():
+                    totalCount+=myCount
+                
+                
+                if len(obsCodonH) >2:
+                    print "[generateConsensusForSpp2]  Poly-alleleic site.",name,chrom,v,c,len(obsCodonH),obsCodonH
+                    statsH[name]['polyAlleleCount']+=1
+                    statsH[name]['polyAlleleSites'].append(c)
+                    
+                highCodon="NNN"
+                highCount=0
+                obsCodonsA=obsCodonH.keys()
+                for myCodon in obsCodonsA:
+                    myCount=obsCodonH[myCodon]
+                    
+                    ## Filter out underrepresented codons
+                    myFreq=float(myCount)/float(totalCount)
+                    if myFreq < MINORALLELEFREQ:
+                        if DEBUG: print "[generateConsensusForSpp2]  Ignoring codon. Freq. too low.",name,v,myCodon,myFreq,obsCodonH
+                        del(obsCodonH[myCodon])
+                        continue
+    
+                    ## collect High Codon
+                    if myCount > highCount:
+                        highCount=myCount
+                        highCodon=myCodon
+                        
+                
+                ## Collect some statistics regarding silent and replacement at heterozygote sites
+                ## NOTE: the codon position is '+' strand based, so the sites will be incorrect for '-' strand
+                ##      genes (i.e. should be codonCount-c)
+                if len(obsCodonH) >1:
+                    statsH[name]['hetCount']+=1
+                    
+                    ## Make sure the direction is correct for refCodon translation
+                    if GENEPRED_H['strand'] == '-':
+                        refAminoAcid=Seq(refCodon, IUPAC.unambiguous_dna).reverse_complement().translate()
+                    else:
+                        refAminoAcid=Seq(refCodon, IUPAC.unambiguous_dna).translate()
+                    
+                    ## evaluate the site state
+                    for myCodon in obsCodonH.keys():
+                        
+                        ## Make sure the direction is correct for myCodon translation
+                        if GENEPRED_H['strand'] == '-':
+                            myAminoAcid=Seq(myCodon, IUPAC.unambiguous_dna).reverse_complement().translate()
+                        else:
+                            myAminoAcid=Seq(myCodon, IUPAC.unambiguous_dna).translate()
+                            
+                        if str(myAminoAcid) != str(refAminoAcid):
+                            print "[generateConsensusForSpp2]  Het. replacement site.",refCodon,refAminoAcid,myCodon,myAminoAcid
+                            statsH[name]['hetSitesReplace'].append(c)
+                        else:
+                            if myCodon != refCodon:
+                                print "[generateConsensusForSpp2]  Het. silent site.",refCodon,refAminoAcid,myCodon,myAminoAcid
+                                statsH[name]['hetSitesSilent'].append(c)
+                            else:
+                                print "[generateConsensusForSpp2]  Het. conserved site.",refCodon,refAminoAcid,myCodon,myAminoAcid
+                                statsH[name]['hetSitesConserv'].append(c)
+                                
+                            
+                choosenCodon=highCodon  ## default
+                
+                if CALLMAJORITYALLELE:
+                    print "[generateConsensusForSpp2]  Calling majority allele.",highCodon
+                    choosenCodon=highCodon
+                    
+                ## "Grant's Site-Salvaging Expansion" 
+                ##- If >= 2 alleles are divergence from the reference (either replacement or silent mutations),
+                ##          then call one of the alleles at random for the site (so we randomly pick the divergent site, either replacement or silent)
+                ##- If one of the alleles is conserved to the reference,
+                ##          then call the site as the reference (so we call the site conserved)
+                if CALLHETREF:
+                    if len(obsCodonH) >1:
+                        divergentSite=0
+                        ## call Reference Codon for heterozygote sites
+                        for myCodon in obsCodonH.keys():
+                            if myCodon != refCodon:
+                                divergentSite+=1
+                                
+                        if divergentSite > 1:
+                            obsCodonShufA=obsCodonH.keys()
+                            random.shuffle(obsCodonShufA)
+                            choosenCodon=obsCodonShufA.pop()
+                            print "[generateConsensusForSpp2]  Het. site (both alleles divergent). Calling randomly between alleles.",name,v,e,i,c,highCodon,refCodon,choosenCodon,obsCodonH
+                
+                        elif divergentSite == 1:
+                            choosenCodon=refCodon
+                            print "[generateConsensusForSpp2]  Het. site (one allele divergent). Calling to ref.",name,v,e,i,c,highCodon,refCodon,choosenCodon,obsCodonH
+                
+                if choosenCodon == 'NNN':
+                    statsH[name]['nnnCount']+=1
+                    statsH[name]['nnnSites'].append(c)
+                    
+                conSeqCodS+=choosenCodon
+       
+                lineA=[]
+                lineA.append(str(c))
+                lineA.append(str(v))
+                lineA.append(str(e))
+                lineA.append(choosenCodon)
+                obsCodonFilteredA=[]
+                print "[generateConsensusForSpp2] obsCodonH:",obsCodonH
+                for myCodon in obsCodonH.keys():
+                    obsCodonFilteredA.append(myCodon+":"+str(obsCodonH[myCodon]))
+                lineA.append(",".join(obsCodonFilteredA))
+                line="\t".join(lineA)
+                obsCodonFP.write(line+"\n")
+                
+                print "[generateConsensusForSpp2] ",name,"Codon status:",chrom,strand,v,e,i,c,"high=",highCodon,"ref=",refCodon,"my=",choosenCodon,obsCodonH
+                if DEBUG: print "[generateConsensusForSpp2] ",conSeqCodS
+                
+                ## end of codon, begin next
+                c+=1 
+                readCodonH={}   ## reset the codon collection
+                refCodon=""
+                #if c==100: sys.exit(33)
+            v+=1
+            i+=1
+            
+            #if i==200:
+            #    print v,e,i,c,conSeqCodS
+            #    sys.exit(88)
+            
+            if TESTMODE:
+                if c==10:
+                    break
+        e+=1
+    
+    statsH[name]['codonCount']=c-1
+    
+    
+    ## if on '-' strand 
+    if GENEPRED_H['strand'] == '-':
+        
+        ## reverse complement 
+        my_seq=Seq(conSeqCodS, generic_dna)
+        conSeqCodS=my_seq.reverse_complement()
+        
+        ## fix sites coordinates
+        codonCount=statsH[name]['codonCount']
+        
+        fwdA=statsH[name]['hetSitesReplace']
+        revA=[]
+        for codonNum in fwdA:
+            revA.append(codonCount-codonNum)
+        statsH[name]['hetSitesReplace']=revA
+        
+        fwdA=statsH[name]['hetSitesSilent']
+        revA=[]
+        for codonNum in fwdA:
+            revA.append(codonCount-codonNum)
+        statsH[name]['hetSitesSilent']=revA
+        
+        fwdA=statsH[name]['hetSitesConserv']
+        revA=[]
+        for codonNum in fwdA:
+            revA.append(codonCount-codonNum)
+        statsH[name]['hetSitesConserv']=revA
+        
+        fwdA=statsH[name]['polyAlleleSites']
+        revA=[]
+        for codonNum in fwdA:
+            revA.append(codonCount-codonNum)
+        statsH[name]['polyAlleleSites']=revA
+        
+        fwdA=statsH[name]['nnnSites']
+        revA=[]
+        for codonNum in fwdA:
+            revA.append(codonCount-codonNum)
+        statsH[name]['nnnSites']=revA
+        
+    ## clean-up
+    bamfile.close()
+    obsCodonFP.close()
+    
+    if GLYCANMOTIF:
+        glycanMotifH=""
+        glycanMotifFP.close()
+        
+        ## populate and/or format the stats
+        statsH[name]['motifCount_NXS']=str(len(statsH[name]['motifSites_NXS']))
+        statsH[name]['motifCount_NXT']=str(len(statsH[name]['motifSites_NXT']))
+        glycanSitesH=statsH[name]['motifSites_NXS'].copy()
+        glycanSitesH.update(statsH[name]['motifSites_NXT'])
+        print "[generateConsensusForSpp2] concatenated glycanSites:",glycanSitesH
+        statsH[name]['motifSites_NXS']=str(statsH[name]['motifSites_NXS'].keys())
+        statsH[name]['motifSites_NXT']=str(statsH[name]['motifSites_NXT'].keys())
+        
+        ## create the mask
+        statsH[name]['motifSites_glycanSiteMask']=[]
+        ## create the freq array
+        statsH[name]['motifSites_glycanSiteCount']=[]
+        statsH[name]['motifSites_glycanSiteTotal']=[]
+        statsH[name]['motifSites_glycanSiteFreq']=[]
+        
+        ## populate the arrays
+        c=1 ## one-based
+        while c<= int(statsH[name]['codonCount']):
+            ## motifSites_glycanSiteMask
+            if glycanSitesH.has_key(c):
+                print "[generateConsensusForSpp2] marked site",c,"in glycan mask",glycanSitesH.keys()
+                statsH[name]['motifSites_glycanSiteMask'].append(str("1"))
+            else:
+                statsH[name]['motifSites_glycanSiteMask'].append(str("0"))
+                
+            ## motifSites_glycanSiteFreq
+            if glycanMotifFreqH.has_key(c):
+                print "[generateConsensusForSpp2] marked site",c,"in glycan mask",glycanSitesH.keys()
+                count=glycanMotifFreqH[c]['glycanCount']
+                total=glycanMotifFreqH[c]['totalCount']
+                if total > 0:
+                    f=float(count)/float(total)
+                else:
+                    f=0.0
+                statsH[name]['motifSites_glycanSiteFreq'].append(str(f))
+                statsH[name]['motifSites_glycanSiteCount'].append(str(count))
+                statsH[name]['motifSites_glycanSiteTotal'].append(str(total))
+            else:
+                statsH[name]['motifSites_glycanSiteFreq'].append("0.0") 
+                statsH[name]['motifSites_glycanSiteCount'].append("0")
+                statsH[name]['motifSites_glycanSiteTotal'].append("0")
+            
+            c+=1
+        statsH[name]['motifSites_glycanSiteMask']="".join(statsH[name]['motifSites_glycanSiteMask'])
+        if DEBUG: print "[generateConsensusForSpp2] glycan site mask for",name,":",statsH[name]['motifSites_glycanSiteMask']
+        if DEBUG: print "[generateConsensusForSpp2] glycan site freq for",name,":",statsH[name]['motifSites_glycanSiteFreq']
+        
+        fileName="glycanMotifStats_"+name+".txt"
+        glycanMotifReportFP = open(fileName,"w")
+        glycanMotifStatsH[name]
+        ## Header line
+        lineA=[]
+        lineA.append("sampleName")
+        lineA.append("motifCount_NXT")
+        lineA.append("motifSites_NXT")
+        lineA.append("motifCount_NXS")
+        lineA.append("motifSites_NXS")
+        line="\t".join(lineA)
+        glycanMotifReportFP.write(line+"\n")
+        ## Data line
+        lineA=[]
+        lineA.append(name)
+        lineA.append(str(glycanMotifStatsH[name]['motifCount_NXT']))
+        lineA.append(str(glycanMotifStatsH[name]['motifSites_NXT'].keys()))
+        lineA.append(str(glycanMotifStatsH[name]['motifCount_NXS']))
+        lineA.append(str(glycanMotifStatsH[name]['motifSites_NXS'].keys()))
+        #print ",".join(glycanMotifStatsH[name]['motifSites'].keys())
+        line="\t".join(lineA)
+        glycanMotifReportFP.write(line+"\n")
+        glycanMotifReportFP.close()
+        print "Wrote glycan motif stats for",name,"to file",fileName
+    
+    resultsH={}
+    resultsH['conSeqCodS']=conSeqCodS
+    resultsH['statsH']=statsH
+    resultsH['name']=name
+    
+    return resultsH
+    
+
+#### Give some usage information for this script #######################################
+def usage(errorNum):
+    print"marssCodon version",VERSION
+    a = """
+Copyright (C) 2010-2020 by Kord M. Kober
+<https://github.com/kordk/marss>
+    
+marssCodon comes with ABSOLUTELY NO WARRANTY.  This is free software, and you
+are welcome to redistribute it under certain conditions.  See the University of California
+License for details.
+
+marssCodon is a program to generate consensus coding sequences from whole-genome 
+reference alignments of short read sequences based on codons in phase.   
+
+Usage: marssCodon [OPTION]...
+
+Options (defaults)
+ -2, --genome2bit           reference genome 2bit file
+                            https://genome.ucsc.edu/FAQ/FAQformat.html#format7
+ -p, --genePredFile         gene prediction file (UCSC genePred table format)
+                            https://genome.ucsc.edu/FAQ/FAQformat.html#format9
+ -b, --bamListFile          file containing comma delimited list of taxa name and
+                            path to the alignment BAM files. One taxa per line.
+                            BAM indexes must be available as <file.bam>.idx
+                            http://samtools.github.io/hts-specs/SAMv1.pdf
+ -m, --method               heterozygote site method to use for consensus call [described below]
+ -n                         number of CPUs/cores to use for parallel BAM file processing (1)
+ -g                         evaluate for glycan motifs (N*S or N*T) (experimental and memory intenstive)
+ -T, --test                 perform reporting of prerequisite packages.
+ -D, --debug                set verbose output. You probably do not want to do this.
+(-h) --help                 show this help (-h works with no other options)
+
+ Methods
+    freq      :   majority observed codon
+    ref       :   reference codon
+    """    
+    print(a)
+    sys.exit(errorNum)
+
+#### main #######################################
+def main(argv):
+
+    genome2bit=""
+    genePredFile=""
+    bamListFile=""
+    callMethod=""
+    glycanMotif=0
+    
+    try:
+        opts, args = getopt.getopt(argv, "hTD2:p:b:m:n:g", ["help","test","debug","genome2bit","genePredFile","bamListFile","callMethod","numCpu","glycanMotif"])
+    except getopt.GetoptError:
+        usage(20)
+    for opt, arg in opts:
+        if opt in ("-h", "--help"):
+            usage(21)
+        if opt in ("-2", "--genome2bit"):
+            genome2bit = arg
+        if opt in ("-p", "--genePredFile"):
+            genePredFile = arg
+        if opt in ("-b", "--bamListFile"):
+            bamListFile = arg
+        if opt in ("-g", "--glycanMotif"):
+            glycanMotif = 1
+            print "WARNING: Glycan motifs will be evaluated. This is under development. You have been warned."
+            print "WARNING: Glycan motifs code is currently only tested for the forward strand."
+            print "WARNING: Glycan motifs code is absurdly memory intenstive and not recommended/usable for high coverage (>10,000 reads?). Downsample."
+        if opt in ("-m", "--callMethod"):
+            callMethod = arg
+        if opt in ("-n", "--numCpu"):
+            global NUMCPU
+            NUMCPU = int(arg)
+            print "Notice: Using",NUMCPU,"cores. No check is performed to determine how many are really available. Caveat emptor."
+        if opt in ("-T", "--test"):
+            global TESTMODE
+            TESTMODE = 1
+        elif opt in ("-D", "--debug"):
+            global DEBUG
+            DEBUG = 1
+            globalParametersH['DEBUG'] = 1
+          
+    ## Make sure we have what we need...  
+    if genome2bit == "":
+        print "Error. Undefined genome2bit:",genome2bit
+        usage(33)
+    if genePredFile == "":
+        print "Error. Undefined genePredFile:",genePredFile
+        usage(34)
+    if bamListFile == "":
+        print "Error. Undefined bamListFile:",bamListFile
+        usage(35)
+    if callMethod == "":
+        print "Error. Undefined callMethod:",callMethod
+        usage(36)
+    
+ 
+    if TESTMODE:
+        print "WARNING. RUNNING IN TEST MODE. THIS IS PROBABLY NOT WHAT YOU WANT."
+        
+    ## Set the globals
+    globalParametersH['TWOBIT']=genome2bit
+    print "Using 2bit:",globalParametersH['TWOBIT']
+    
+    globalParametersH['BAMFILES_H']=collectBamFiles(bamListFile)
+    print "Using",len(globalParametersH['BAMFILES_H']),"BAM files in:",bamListFile
+
+    globalParametersH['GENEPRED_H'],globalParametersH['GENEPREDNAME']=loadGenePredH(genePredFile)
+    print "Using gene pred",globalParametersH['GENEPRED_H']['name'],"from",genePredFile,"(GENEPRED_H)."
+    
+    globalParametersH['GENESEQ_H'],globalParametersH['refGeneSeqS']=hashReferenceGene(globalParametersH)
+    print "Collected",len(globalParametersH['GENESEQ_H'].keys()),"sites from reference gene pred (GENESEQ_H)."
+    #if DEBUG: print refGeneSeqS
+
+    globalParametersH['TESTMODE'] = TESTMODE
+    
+    globalParametersH['GLYCANMOTIF'] = glycanMotif
+
+    if callMethod == "freq":
+        globalParametersH['CALLMAJORITYALLELE']=1
+    elif callMethod == "ref":
+        globalParametersH['CALLHETREF']=1
+    else:
+        print "Unidentified heterozygote site calling method",callMethod
+        usage(44)
+
+
+    ## Generate the consensus sequence at the majority codon level for each species
+    
+    ## 2016-Feb-29. Previous serial code.
+    
+    # consensusCodonH={}
+    # statsH={}
+    # for spp in BAMFILES_H.keys():
+    #     #if spp != "hpul": continue  ## only use 'hpul' for testing for now
+    #     consensusCodonH[spp],statsH = generateConsensusForSpp2(spp,statsH)
+    #     if DEBUG:
+    #         #print spp,statsH[spp]
+    #         print ">"+spp+"\n"+consensusCodonH[spp]
+    
+    ## 2016-Feb-29. New parallel code.
+    
+    ## start the job server
+    # tuple of all parallel python servers to connect with
+    ppservers = ()
+    job_server = pp.Server(NUMCPU, ppservers=ppservers)    
+    print "Starting pp with", job_server.get_ncpus(), "workers"
+    sys.stdout.flush()
+    
+    ## Load the data using pp
+    ## http://www.parallelpython.com/content/view/15/30/#QUICKSMP
+    ##      f1 = job_server.submit(func1, args1, depfuncs1, modules1)
+    idx=0
+    jobsA=[]
+    for spp in globalParametersH['BAMFILES_H'].keys():
+        # consensusCodonH[spp],statsH,name = generateConsensusForSpp2(spp)
+        jobsA.append( job_server.submit(generateConsensusForSpp2, (globalParametersH,spp), (process_pileupcolumn,), ("time","gzip")) )
+        sys.stdout.flush()
+        idx+=1
+        # if idx==3:
+        #     break
+
+    ## wait for jobs in all groups to finish 
+    job_server.print_stats()
+    
+    consensusCodonH={}
+    statsH={}
+    
+    ## Retrieve results of all submited jobs
+    ## merge the results
+    idx=0
+    for job in jobsA:
+        job_server.print_stats()
+        sys.stdout.flush()
+        jobH = job()
+        if jobH:
+            if DEBUG: print "[main] job",idx,len(jobH),jobH
+            print "[main] retrieving results from job",idx,len(jobH)
+            sys.stdout.flush()
+        else:
+            print "[main] Error. no jobs found for",idx,jobH
+            continue
+        
+        spp=jobH['name']
+        consensusCodonH[spp]=jobH['conSeqCodS']
+        statsH[spp]=jobH['statsH'][spp]
+        
+        ## release some memory
+        jobsA[idx]=0
+        idx+=1
+        
+    for spp in consensusCodonH.keys():
+        print "[main] consensusCodonH:", spp,consensusCodonH[spp]
+        print "[main] statsH:",spp,statsH[spp]
+        sys.stdout.flush()
+    
+    
+    ## Write out codon-based call
+    conFileName="consensAlignCodon"
+    consFastaCodonFP=open(conFileName+".fa","w")
+    consFastaCodonFP.write(">ref\n")
+    consFastaCodonFP.write(str(globalParametersH['refGeneSeqS'][:-3])+"\n")
+    for spp,seq in consensusCodonH.iteritems():
+        consFastaCodonFP.write(">"+spp+"\n"+str(seq)[:-3]+"\n")
+    consFastaCodonFP.close()
+    print "Wrote codon-level consensus alignment to file",conFileName+".fa"
+    
+    
+    ## Write out stats
+    statFileName="alignInfo.txt"
+    statsFP=open(statFileName,"w")
+    myKeysA=[]
+    for spp,infoH in statsH.iteritems():
+        if len(myKeysA)==0:
+            myKeysA=sorted(infoH.keys())
+            statsFP.write("species\t"+"\t".join(myKeysA)+"\n")
+        rowA=[]
+        rowA.append(spp)
+        for key in myKeysA:
+            rowA.append(str(infoH[key]))
+        statsFP.write("\t".join(rowA)+"\n")
+    
+    print "Wrote alignment stats to file",statFileName
+    
+    statsFP.close()
+    
+#### Start here. #######################################
+if __name__ == "__main__":
+    main(sys.argv[1:])
