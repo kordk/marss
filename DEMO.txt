@@ -60,7 +60,7 @@ ls -1
 cd demo/SPU_009691/codon
 
 ## To generate consensus alignment for codons for this GenPred using the 'freq' method and 2 CPUs/cores and capture stdout to a log file:
-time -p ~/proj/marss/src/marssCodon \
+time -p ../../src/marssCodon \
     -n 2 \
     -2 ../strPur4.local.1kb.2bit \
     -p ../SPU_009691.local.ref.gp \
@@ -69,7 +69,7 @@ time -p ~/proj/marss/src/marssCodon \
     >marssCodon.out
  
 ## To generate the glycan motif evaluation in additinon to the consensus alignment for codons for this GenPred using the 'freq' method and 8 CPUs/cores and capture stdout to a log file:
-time -p ~/proj/marss/src/marssCodon \
+time -p ../../src/marssCodon \
     -n 8 \
     -2 ../strPur4.local.1kb.2bit \
     -p ../SPU_009691.local.ref.gp \
